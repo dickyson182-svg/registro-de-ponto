@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controle de Ponto Digital</title>
+    
+    <!-- Carregamento do Tailwind CSS CDN para estilização -->
+    <script src="https://cdn-tailwindcss.vercel.app/"></script>
+    <style>
+        :root {
+            --font-inter: 'Inter', sans-serif;
+        }
+        body {
+            font-family: var(--font-inter);
+            min-height: 100vh;
+            background-color: #f3f4f6;
+        }
+        /* Estilos para o modal */
+        .modal-overlay {
+            transition: opacity 0.3s ease;
+        }
+        .modal-container {
+            transition: transform 0.3s ease;
+        }
+    </style>
+
+    <!-- Carregamento das Bibliotecas Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            onAuthStateChanged,
+            updateProfile,
+            GoogleAuthProvider,
+            signInWithPopup,
+            signOut
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            getDoc,
+            setDoc, 
+            onSnapshot, 
+            collection,
+            query,
+            Timestamp,
+            setLogLevel 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Habilita logs de debug do Firestore
+        setLogLevel('debug');
+
+        // --- Variáveis Globais (Disponibilizadas pelo Ambiente) ---
+        window.appId = typeof __app_id !== 'undefined' ? __app_id : 'default-timeclock-app';
+        window.firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        
+        window.firebaseServices = {
+            initializeApp, getAuth, onAuthStateChanged, updateProfile, GoogleAuthProvider, signInWithPopup, signOut,
+            getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, Timestamp
+        };
+    </script>
+
+    <!-- Carregamento das Bibliotecas PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body class="p-4 md:p-8">
+
+    <div id="app-root">
+        <!-- Conteúdo do aplicativo será injetado aqui pelo JavaScript -->
+        <div class="flex items-center justify-center min-h-screen bg-gray-50">
+            <div class="flex flex-col items-center p-8 bg-white rounded-xl shadow-lg">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+                <p class="mt-4 text-lg text-gray-700">Carregando e autenticando...</p>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Importa serviços Firebase do objeto global configurado
+        const {
+            initializeApp, getAuth, onAuthStateChanged, updateProfile, GoogleAuthProvider, signInWithPopup, signOut,
+            getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, Timestamp
+        } = window.firebaseServices;
+
+        const ENTRY_TYPES = ["Entrada", "Almoço Início", "Almoço Fim", "Saída"];
+        const DAYS_OF_WEEK = [
+            { key: 'monday', label: 'Segunda-feira' },
+            { key: 'tuesday', label: 'Terça-feira' },
+            { key: 'wednesday', label: 'Quarta-feira' },
+            { key: 'thursday', label: 'Quinta-feira' },
+            { key: 'friday', label: 'Sexta-feira' },
+            { key: 'saturday', label: 'Sábado' }
+        ];
+
+        // --- Variáveis de Estado Globais ---
+        let db = null;
+        let auth = null;
+        let userId = null;
+        let userName = null;
+        let userPhotoURL = null;
+        let dailyEntries = {};
+        let currentViewDate = new Date();
+        let workloadSettings = {};
+        let dataListenerUnsubscribe = null; 
+        let settingsListenerUnsubscribe = null;
+        let clockInterval = null;
+
+        // Variáveis de estado para a UI
+        let error = null;
+        let successMessage = null;
+        let nextStatus = ENTRY_TYPES[0];
+        let isExporting = false;
+        let isSettingsOpen = false;
+        let isSavingSettings = false;
+
+        /**
+         * Funções utilitárias
+         */
+        const formatTime = (time) => {
+            if (!time) return '--:--';
+            const date = time instanceof Timestamp ? time.toDate() : new Date(time);
+            return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        };
+
+        const formatDuration = (minutes) => {
+            if (minutes === null || minutes === undefined || isNaN(minutes) || minutes === 0) return '--';
+            const totalHours = Math.floor(minutes / 60);
+            const remainingMinutes = Math.round(minutes % 60);
+            const m = remainingMinutes.toString().padStart(2, '0');
+            return `${totalHours}h ${m}m`;
+        };
+        
+        const formatDateKey = (date) => {
+            // Corrige o problema do fuso horário convertendo a data para UTC antes de formatar
+            const userTimezoneOffset = date.getTimezoneOffset() * 60000;
+            const localDate = new Date(date.getTime() - userTimezoneOffset);
+            return localDate.toISOString().split('T')[0];
+        };
+        
+        /**
+         * Lógica do Relógio
+         */
+        function startClock() {
+            if (clockInterval) clearInterval(clockInterval);
+            const update = () => {
+                const clockElement = document.getElementById('live-clock');
+                if (clockElement) {
+                    clockElement.textContent = new Date().toLocaleTimeString('pt-BR', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                }
+            };
+            update();
+            clockInterval = setInterval(update, 1000);
+        }
+
+        /**
+         * Cálculos de totais
+         */
+        const calculateDailyTotals = (entries, dateKey) => {
+            const sortedEntries = [...(entries || [])].sort((a, b) => a.timestamp.toDate() - b.timestamp.toDate());
+            let totalWorkedMinutes = 0;
+            let lunchMinutes = 0;
+            const entryTimes = {};
+            sortedEntries.forEach(e => { entryTimes[e.type] = e.timestamp.toDate().getTime(); });
+            const { "Entrada": entradaTime, "Almoço Início": almocoInicioTime, "Almoço Fim": almocoFimTime, "Saída": saidaTime } = entryTimes;
+            
+            if (almocoInicioTime && almocoFimTime && almocoFimTime > almocoInicioTime) {
+                lunchMinutes = (almocoFimTime - almocoInicioTime) / (1000 * 60);
+            }
+
+            if (entradaTime && saidaTime && saidaTime > entradaTime) {
+                const workTime = (saidaTime - entradaTime) / (1000 * 60);
+                totalWorkedMinutes = workTime - lunchMinutes;
+            } else if (entradaTime && !saidaTime && formatDateKey(new Date()) === dateKey) { 
+                 const partialWorkTime = (new Date().getTime() - entradaTime) / (1000 * 60);
+                 totalWorkedMinutes = partialWorkTime - lunchMinutes;
+            }
+            
+            const date = new Date(dateKey + 'T12:00:00Z'); // Usa UTC para evitar problemas de fuso
+            const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][date.getUTCDay()];
+            const expectedHours = workloadSettings[dayOfWeek] || 0;
+            const expectedMinutes = expectedHours * 60;
+            
+            let overtimeMinutes = 0;
+            let debitMinutes = 0;
+
+            if (saidaTime && expectedMinutes > 0) {
+                const balance = totalWorkedMinutes - expectedMinutes;
+                if (balance > 0) {
+                    overtimeMinutes = balance;
+                } else if (balance < 0) {
+                    debitMinutes = Math.abs(balance);
+                }
+            }
+
+            return {
+                totalWorkedMinutes: totalWorkedMinutes > 0 ? Math.round(totalWorkedMinutes) : 0,
+                lunchMinutes: lunchMinutes > 0 ? Math.round(lunchMinutes) : 0,
+                overtimeMinutes: Math.round(overtimeMinutes),
+                debitMinutes: Math.round(debitMinutes),
+                lastEntryType: sortedEntries.length > 0 ? sortedEntries[sortedEntries.length - 1].type : null,
+                entries: sortedEntries 
+            };
+        };
+        
+        const getNextStatus = () => {
+            const todayData = dailyEntries[formatDateKey(new Date())];
+            const lastType = todayData ? todayData.lastEntryType : null;
+            if (!lastType) return ENTRY_TYPES[0]; 
+            if(lastType === ENTRY_TYPES[3]) return null; // Saída
+            const lastIndex = ENTRY_TYPES.indexOf(lastType);
+            return (lastIndex !== -1 && lastIndex < ENTRY_TYPES.length - 1) ? ENTRY_TYPES[lastIndex + 1] : ENTRY_TYPES[0];
+        }
+
+        const processDailyEntries = (docs) => {
+            const entriesMap = {};
+            docs.forEach(doc => {
+                const data = doc.data();
+                entriesMap[data.dateKey] = { ...data, ...calculateDailyTotals(data.entries || [], data.dateKey) };
+            });
+            dailyEntries = entriesMap;
+            nextStatus = getNextStatus();
+        }
+
+        /**
+         * Listeners do Firestore
+         */
+        function startDataListener(uid) {
+            if (dataListenerUnsubscribe) dataListenerUnsubscribe();
+            const collectionPath = `/artifacts/${window.appId}/users/${uid}/timeEntries`;
+            const q = query(collection(db, collectionPath)); 
+            dataListenerUnsubscribe = onSnapshot(q, (snapshot) => {
+                processDailyEntries(snapshot.docs);
+                renderApp();
+            }, (err) => {
+                console.error("Erro ao carregar registros:", err);
+                error = "Não foi possível carregar os registros de ponto.";
+                renderApp();
+            });
+        }
+        
+        function startSettingsListener(uid) {
+            if (settingsListenerUnsubscribe) settingsListenerUnsubscribe();
+            const settingsDocRef = doc(db, `/artifacts/${window.appId}/users/${uid}/settings/workload`);
+            settingsListenerUnsubscribe = onSnapshot(settingsDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    workloadSettings = docSnap.data();
+                } else {
+                    workloadSettings = { monday: 8, tuesday: 8, wednesday: 8, thursday: 8, friday: 8, saturday: 0 };
+                }
+                processDailyEntries(Object.values(dailyEntries).map(d => ({ data: () => d })));
+                renderApp();
+            }, (err) => {
+                console.error("Erro ao carregar configurações:", err);
+                error = "Não foi possível carregar as configurações de carga horária.";
+                renderApp();
+            });
+        }
+        
+        /**
+         * Funções de Autenticação
+         */
+        window.signInWithGoogle = async () => {
+            const provider = new GoogleAuthProvider();
+            try {
+                error = null;
+                renderApp(); // Limpa erros antigos da UI
+
+                await signInWithPopup(auth, provider);
+                // O sucesso é tratado pelo listener onAuthStateChanged
+            } catch (err) {
+                console.error("Erro na autenticação com Google:", err);
+                if (err.code === 'auth/unauthorized-domain') {
+                    const hostname = window.location.hostname;
+                    let errorHTML = `
+                        <div class="text-left p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg mt-4">
+                            <h3 class="font-bold text-lg mb-2">Ação Necessária: Autorizar Domínio</h3>`;
+
+                    if (hostname) {
+                        errorHTML += `
+                            <p class="text-sm">O login com Google falhou porque o domínio (<code class="bg-red-200 text-red-900 p-1 rounded font-mono">${hostname}</code>) não está na lista de permissões do seu projeto Firebase.</p>
+                            <p class="mt-3 text-sm"><strong>Para corrigir:</strong> Copie o domínio abaixo e adicione-o na seção "Authorized domains" do seu projeto Firebase.</p>
+                            <div class="mt-2 p-2 bg-red-200 text-red-900 rounded font-mono text-center break-all">${hostname}</div>`;
+                    } else {
+                        errorHTML += `
+                            <p class="text-sm">O login com Google falhou porque o domínio deste aplicativo não está na lista de permissões do seu projeto Firebase.</p>
+                            <p class="mt-3 text-sm font-bold">Como encontrar o domínio:</p>
+                            <p class="text-sm">Olhe para a <strong>barra de endereço do seu navegador</strong>. O domínio é a parte do endereço logo após "https://".</p>
+                            <p class="text-sm mt-2"><strong>Exemplo:</strong> Se a URL for <code class="bg-red-200 text-red-900 p-1 rounded font-mono">https://exemplo-de-site.com/app</code>, o domínio que você deve adicionar é <code class="bg-red-200 text-red-900 p-1 rounded font-mono">exemplo-de-site.com</code>.</p>
+                            <p class="mt-3 text-sm">Depois de encontrar seu domínio, adicione-o na seção <strong>Authorized domains</strong> nas configurações de autenticação do seu projeto Firebase.</p>`;
+                    }
+                    
+                    errorHTML += `
+                            <p class="mt-3 text-xs">Após adicionar, atualize esta página (F5) e tente fazer o login novamente.</p>
+                        </div>`;
+                    error = errorHTML;
+
+                } else {
+                    error = "Falha ao entrar com Google. Tente novamente.";
+                }
+                renderApp(); // Mostra o novo erro na UI
+            }
+        };
+
+        window.logout = async () => {
+            try {
+                await signOut(auth);
+            } catch (err) {
+                console.error("Erro ao sair:", err);
+                error = "Não foi possível sair. Tente novamente.";
+                renderApp();
+            }
+        };
+
+        /**
+         * Funções de Ação da UI
+         */
+        window.saveUserName = async () => {
+            if (!auth.currentUser) {
+                error = "Usuário não autenticado.";
+                successMessage = null;
+                renderApp();
+                return;
+            }
+            const nameInput = document.getElementById('userNameInput');
+            const newName = nameInput.value.trim();
+
+            if (!newName) {
+                error = "O nome não pode estar em branco.";
+                successMessage = null;
+                renderApp();
+                return;
+            }
+
+            try {
+                await updateProfile(auth.currentUser, { displayName: newName });
+                userName = newName;
+                successMessage = "Nome atualizado com sucesso!";
+                error = null;
+                renderApp();
+                setTimeout(() => { successMessage = null; renderApp(); }, 3000);
+            } catch (e) {
+                console.error("Erro ao atualizar o perfil:", e);
+                error = "Não foi possível atualizar o nome. Tente novamente.";
+                successMessage = null;
+                renderApp();
+            }
+        };
+
+        window.recordEntry = async () => {
+            if (!userId) {
+                error = "Usuário não autenticado.";
+                renderApp();
+                return;
+            }
+            
+            const todayKey = formatDateKey(new Date());
+            const todayDocRef = doc(db, `/artifacts/${window.appId}/users/${userId}/timeEntries/${todayKey}`);
+            const entryTimestamp = Timestamp.now();
+            const currentStatus = getNextStatus();
+
+            if (!currentStatus) {
+                error = "Todos os pontos de hoje já foram registrados.";
+                renderApp();
+                return;
+            }
+
+            try {
+                const docSnap = await getDoc(todayDocRef);
+                const existingEntries = docSnap.exists() ? docSnap.data().entries : [];
+                const updatedEntries = [...existingEntries, { type: currentStatus, timestamp: entryTimestamp }];
+
+                await setDoc(todayDocRef, { dateKey: todayKey, entries: updatedEntries }, { merge: true });
+
+                successMessage = `${currentStatus} registrado com sucesso!`;
+                error = null;
+                setTimeout(() => { successMessage = null; renderApp(); }, 3000);
+            } catch (e) {
+                console.error("Erro ao registrar ponto:", e);
+                error = "Não foi possível registrar o ponto. Tente novamente.";
+            } finally {
+                renderApp();
+            }
+        };
+
+        window.exportToPDF = async () => {
+            if (isExporting) return;
+            isExporting = true;
+            renderApp();
+
+            const { jsPDF } = window.jspdf;
+            const content = document.getElementById('report-content');
+            const pdfHeader = document.getElementById('pdf-header');
+            pdfHeader.classList.remove('hidden');
+
+            try {
+                const canvas = await html2canvas(content, { scale: 2, useCORS: true });
+                const imgData = canvas.toDataURL('image/png');
+                const pdf = new jsPDF({ orientation: 'portrait', unit: 'px', format: 'a4' });
+                const pdfWidth = pdf.internal.pageSize.getWidth();
+                const imgProps = pdf.getImageProperties(imgData);
+                const imgHeight = (imgProps.height * pdfWidth) / imgProps.width;
+                
+                pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, imgHeight);
+                pdf.save(`relatorio-ponto-${currentViewDate.getFullYear()}-${currentViewDate.getMonth() + 1}.pdf`);
+            } catch (e) {
+                console.error("Erro ao gerar PDF:", e);
+                error = "Ocorreu um erro ao exportar o PDF.";
+            } finally {
+                pdfHeader.classList.add('hidden');
+                isExporting = false;
+                renderApp();
+            }
+        };
+
+        window.handleMonthChange = (offset) => {
+            currentViewDate.setMonth(currentViewDate.getMonth() + offset);
+            renderApp();
+        };
+
+        window.openSettings = () => { isSettingsOpen = true; renderApp(); };
+        window.closeSettings = () => { isSettingsOpen = false; renderApp(); };
+        
+        window.saveWorkloadSettings = async () => {
+            if (!db || !userId) return;
+            isSavingSettings = true;
+            renderApp();
+
+            const newSettings = {};
+            DAYS_OF_WEEK.forEach(day => {
+                const input = document.getElementById(`workload-${day.key}`);
+                const value = parseFloat(input.value) || 0;
+                newSettings[day.key] = value < 0 ? 0 : value;
+            });
+
+            try {
+                const settingsDocRef = doc(db, `/artifacts/${window.appId}/users/${userId}/settings/workload`);
+                await setDoc(settingsDocRef, newSettings);
+                successMessage = "Carga horária salva com sucesso!";
+                setTimeout(() => { successMessage = null; renderApp(); }, 3000);
+            } catch (e) {
+                console.error("Erro ao salvar carga horária:", e);
+                error = "Não foi possível salvar as configurações.";
+            } finally {
+                isSavingSettings = false;
+                isSettingsOpen = false;
+                renderApp();
+            }
+        };
+
+        /**
+         * Funções de Renderização
+         */
+        function renderLoginScreen() {
+            return `
+                <div class="flex flex-col items-center justify-center min-h-screen bg-gray-100">
+                    <div class="p-8 bg-white rounded-2xl shadow-2xl text-center w-full max-w-lg">
+                        <h1 class="text-3xl font-extrabold text-blue-700 mb-2">Controle de Ponto</h1>
+                        <p class="text-gray-600 mb-8">Acesse para registrar suas horas.</p>
+                        <button onclick="signInWithGoogle()" class="w-full inline-flex justify-center items-center px-6 py-3 border border-gray-300 rounded-lg shadow-sm bg-white text-gray-700 font-medium hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-all">
+                            <svg class="w-5 h-5 mr-3" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4C12.955 4 4 12.955 4 24s8.955 20 20 20s20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/><path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4C16.318 4 9.656 8.337 6.306 14.691z"/><path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.211 35.091 26.715 36 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/><path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.19 4.218-4.098 5.571l6.19 5.238C42.012 36.49 44 30.686 44 24c0-1.341-.138-2.65-.389-3.917z"/></svg>
+                            Entrar com Google
+                        </button>
+                         ${error ? (typeof error === 'string' && error.startsWith('<div')) ? error : `<p class="mt-4 p-2 text-sm text-red-700 bg-red-100 rounded-md">${error}</p>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        
+        function renderApp() {
+            const root = document.getElementById('app-root');
+            if (!root) return;
+            
+            if (!userId) {
+                root.innerHTML = renderLoginScreen();
+                return;
+            }
+
+            const currentMonth = currentViewDate.getMonth();
+            const currentYear = currentViewDate.getFullYear();
+            const sortedDates = Object.keys(dailyEntries).filter(dateKey => {
+                const entryDate = new Date(dateKey + 'T12:00:00Z');
+                return entryDate.getUTCMonth() === currentMonth && entryDate.getUTCFullYear() === currentYear;
+            }).sort((a, b) => b.localeCompare(a)); 
+            let totalWorkMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].totalWorkedMinutes || 0), 0);
+            let totalLunchMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].lunchMinutes || 0), 0);
+            let totalOvertimeMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].overtimeMinutes || 0), 0);
+            let totalDebitMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].debitMinutes || 0), 0);
+            const monthYearLabel = currentViewDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+            
+            root.innerHTML = `
+                <!-- Modal de Configurações -->
+                <div id="settings-modal" class="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 ${isSettingsOpen ? 'opacity-100 visible' : 'opacity-0 invisible'}">
+                    <div class="modal-container bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4 ${isSettingsOpen ? 'transform scale-100' : 'transform scale-95'}">
+                        <div class="flex justify-between items-center mb-4"><h3 class="text-xl font-bold text-gray-800">Configurar Carga Horária Diária</h3><button onclick="closeSettings()" class="p-1 rounded-full hover:bg-gray-200"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button></div>
+                        <div class="space-y-4">
+                            ${DAYS_OF_WEEK.map(day => `<div class="flex items-center justify-between"><label for="workload-${day.key}" class="text-gray-700">${day.label}</label><input type="number" id="workload-${day.key}" min="0" max="24" step="0.5" class="w-24 text-center border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" value="${workloadSettings[day.key] !== undefined ? workloadSettings[day.key] : 8}"><span class="text-gray-500 ml-2">horas</span></div>`).join('')}
+                        </div>
+                        <div class="mt-6 flex justify-end space-x-3"><button onclick="closeSettings()" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancelar</button><button onclick="saveWorkloadSettings()" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50" ${isSavingSettings ? 'disabled' : ''}>${isSavingSettings ? 'Salvando...' : 'Salvar'}</button></div>
+                    </div>
+                </div>
+
+                <div class="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
+                    <header class="mb-8 text-center">
+                        <h1 class="text-4xl font-extrabold text-blue-700">Controle de Ponto Digital</h1>
+                         <div class="mt-4 p-4 bg-white rounded-lg max-w-md mx-auto shadow-md relative flex items-center">
+                            <img src="${userPhotoURL || 'https://placehold.co/80x80/E2E8F0/4A5568?text=User'}" alt="Foto do perfil" class="w-16 h-16 rounded-full mr-4 border-2 border-blue-200">
+                            <div class="text-left">
+                                <p class="text-gray-800 text-lg"><span class="font-bold">${userName || 'Usuário'}</span></p>
+                                <p class="text-sm text-gray-600">ID: <span class="font-mono text-xs break-all">${userId}</span></p>
+                            </div>
+                            <div class="absolute top-2 right-2 flex space-x-1">
+                                <button onclick="openSettings()" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Configurações"><svg class="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
+                                <button onclick="logout()" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Sair"><svg class="w-6 h-6 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg></button>
+                            </div>
+                        </div>
+                    </header>
+                    
+                    ${successMessage ? `<div class="mb-4 p-4 text-sm text-green-700 bg-green-100 rounded-lg max-w-lg mx-auto">${successMessage}</div>` : ''}
+                    ${error ? `<div class="mb-4 p-4 text-sm text-red-700 bg-red-100 rounded-lg max-w-lg mx-auto">${error}</div>` : ''}
+
+                    <div class="max-w-lg mx-auto text-center mb-6">
+                        <div id="live-clock" class="text-6xl font-bold text-gray-800 tracking-wider"></div>
+                        <div class="text-lg text-gray-500 mt-1">${new Date().toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+                    </div>
+                    
+                    <div class="mb-6 max-w-lg mx-auto"><button onclick="recordEntry()" class="w-full py-4 px-6 text-xl font-bold text-white rounded-xl shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-opacity-50 ${nextStatus === 'Saída' || nextStatus === 'Almoço Fim' ? 'bg-red-500 hover:bg-red-600 focus:ring-red-300' : 'bg-green-500 hover:bg-green-600 focus:ring-green-300'} ${!nextStatus ? 'bg-gray-400 cursor-not-allowed' : ''}" ${!nextStatus ? 'disabled' : ''}>${nextStatus ? `Registrar ${nextStatus}` : 'Todos os pontos de hoje foram registrados'}</button></div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8 max-w-7xl mx-auto">
+                        <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Trabalhadas</p><p class="text-3xl font-bold text-gray-800">${formatDuration(totalWorkMinutes) || '0h 00m'}</p></div><div class="bg-blue-100 p-3 rounded-full"><svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div></div>
+                        <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Almoço</p><p class="text-3xl font-bold text-gray-800">${formatDuration(totalLunchMinutes) || '0h 00m'}</p></div><div class="bg-yellow-100 p-3 rounded-full"><svg class="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 15.546c-.523 0-1.046.151-1.5.454a2.704 2.704 0 01-3 0 2.704 2.704 0 00-3 0 2.704 2.704 0 01-3 0 2.704 2.704 0 00-3 0c-.454-.303-.977-.454-1.5-.454V5.546c.523 0 1.046-.151 1.5-.454a2.704 2.704 0 013 0 2.704 2.704 0 003 0 2.704 2.704 0 013 0 2.704 2.704 0 003 0c.454.303.977.454 1.5.454v10z"></path></svg></div></div>
+                        <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Débito</p><p class="text-3xl font-bold text-red-600">${formatDuration(totalDebitMinutes) || '0h 00m'}</p></div><div class="bg-red-100 p-3 rounded-full"><svg class="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div></div>
+                        <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Extras</p><p class="text-3xl font-bold text-green-600">${formatDuration(totalOvertimeMinutes) || '0h 00m'}</p></div><div class="bg-green-100 p-3 rounded-full"><svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div></div>
+                    </div>
+
+                    <main class="bg-white p-4 sm:p-6 md:p-8 rounded-2xl shadow-lg max-w-7xl mx-auto">
+                        <div class="flex flex-col sm:flex-row items-center justify-between mb-6"><div class="flex items-center space-x-4"><button onclick="handleMonthChange(-1)" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Mês anterior"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button><h2 class="text-2xl font-bold text-gray-800 text-center w-48">${monthYearLabel}</h2><button onclick="handleMonthChange(1)" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Próximo mês"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></button></div><button onclick="exportToPDF()" class="mt-4 sm:mt-0 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center space-x-2 disabled:opacity-50" ${isExporting ? 'disabled' : ''}><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg><span>${isExporting ? 'Exportando...' : 'Exportar PDF'}</span></button></div>
+                        <div class="overflow-x-auto"><div id="report-content" class="bg-white"><div id="pdf-header" class="hidden"><div class="mb-6 pb-2 border-b border-gray-300"><h2 class="text-2xl font-bold text-gray-800">Relatório de Ponto</h2><p class="text-sm text-gray-500">Mês de ${monthYearLabel} | Gerado em: ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR')}</p><p class="text-sm text-gray-500">Usuário: ${userName || 'Não definido'} (${userId})</p></div></div><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Entrada</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Início Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fim Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Saída</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Trabalhado</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Débito</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Extra</th></tr></thead><tbody class="bg-white divide-y divide-gray-200">${ sortedDates.length === 0 ? `<tr><td colspan="9" class="px-6 py-12 text-center text-gray-500">Nenhum registro encontrado para este mês.</td></tr>` : ( sortedDates.map((dateKey) => { const dayData = dailyEntries[dateKey]; const getEntryTime = (type) => { const entry = dayData.entries.find(e => e.type === type); return entry ? formatTime(entry.timestamp) : '--:--'; }; const dateObj = new Date(dateKey + 'T12:00:00Z'); const dateFormatted = dateObj.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: 'UTC' }); const isToday = dateKey === formatDateKey(new Date()); const debitMinutes = dayData.debitMinutes || 0; const overtimeMinutes = dayData.overtimeMinutes || 0; return `<tr class="${isToday ? 'bg-blue-50 font-semibold' : ''} hover:bg-gray-50"><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-900">${dateFormatted}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Entrada")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Almoço Início")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Almoço Fim")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Saída")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${formatDuration(dayData.lunchMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${formatDuration(dayData.totalWorkedMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm ${debitMinutes > 0 ? 'text-red-600 font-semibold' : 'text-gray-700'}">${formatDuration(debitMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm ${overtimeMinutes > 0 ? 'text-green-600 font-semibold' : 'text-gray-700'}">${formatDuration(overtimeMinutes)}</td></tr>`; }).join(''))}</tbody></table></div></div>
+                    </main>
+                </div>
+            `;
+            
+            startClock();
+        }
+        
+        /**
+         * Inicialização do App
+         */
+        async function initializeFirebase() {
+            if (!window.firebaseConfig) {
+                error = "Erro: Configuração do Firebase não encontrada.";
+                renderApp();
+                return;
+            }
+            try {
+                const app = initializeApp(window.firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userName = user.displayName;
+                        userPhotoURL = user.photoURL;
+                        startDataListener(userId); 
+                        startSettingsListener(userId);
+                    } else {
+                        userId = null;
+                        userName = null;
+                        userPhotoURL = null;
+                        dailyEntries = {};
+                        workloadSettings = {};
+                        if (dataListenerUnsubscribe) dataListenerUnsubscribe();
+                        if (settingsListenerUnsubscribe) settingsListenerUnsubscribe();
+                        if (clockInterval) {
+                            clearInterval(clockInterval);
+                            clockInterval = null;
+                        }
+                        renderApp();
+                    }
+                });
+            } catch (e) {
+                console.error("Erro na inicialização:", e);
+                error = "Erro na inicialização do app. Tente novamente.";
+                renderApp();
+            }
+        }
+
+        window.onload = initializeFirebase;
+    </script>
+</body>
+</html>
+
+
+
