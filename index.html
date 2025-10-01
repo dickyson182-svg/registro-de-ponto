@@ -11,10 +11,15 @@
         :root {
             --font-inter: 'Inter', sans-serif;
         }
+        html {
+            scroll-behavior: smooth;
+        }
         body {
             font-family: var(--font-inter);
             min-height: 100vh;
             background-color: #f3f4f6;
+            display: flex;
+            flex-direction: column;
         }
         /* Estilos para o modal */
         .modal-overlay {
@@ -23,80 +28,28 @@
         .modal-container {
             transition: transform 0.3s ease;
         }
+        .site-container {
+            flex: 1;
+        }
     </style>
-
-    <!-- Carregamento das Bibliotecas Firebase -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { 
-            getAuth, 
-            onAuthStateChanged,
-            updateProfile,
-            createUserWithEmailAndPassword,
-            signInWithEmailAndPassword,
-            GoogleAuthProvider,
-            signInWithPopup,
-            signOut
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { 
-            getFirestore, 
-            doc, 
-            getDoc,
-            setDoc, 
-            onSnapshot, 
-            collection,
-            query,
-            Timestamp,
-            setLogLevel 
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        
-        // Habilita logs de debug do Firestore
-        setLogLevel('debug');
-
-        // --- Configuração do Firebase ---
-        // IMPORTANTE: Cole a sua configuração do Firebase aqui!
-        const firebaseConfig = {
-            apiKey: "SUA_API_KEY",
-            authDomain: "SEU_AUTH_DOMAIN",
-            projectId: "SEU_PROJECT_ID",
-            storageBucket: "SEU_STORAGE_BUCKET",
-            messagingSenderId: "SEU_MESSAGING_SENDER_ID",
-            appId: "SEU_APP_ID"
-        };
-        
-        window.firebaseServices = {
-            initializeApp, getAuth, onAuthStateChanged, updateProfile,
-            createUserWithEmailAndPassword, signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut,
-            getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, Timestamp,
-            firebaseConfig
-        };
-    </script>
 
     <!-- Carregamento das Bibliotecas PDF -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
-<body class="p-4 md:p-8">
+<body class="bg-gray-100">
 
-    <div id="app-root">
+    <div id="app-root" class="site-container">
         <!-- Conteúdo do aplicativo será injetado aqui pelo JavaScript -->
-        <div class="flex items-center justify-center min-h-screen bg-gray-50">
+        <div class="flex items-center justify-center min-h-screen">
             <div class="flex flex-col items-center p-8 bg-white rounded-xl shadow-lg">
                 <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
-                <p class="mt-4 text-lg text-gray-700">A carregar e autenticar...</p>
+                <p class="mt-4 text-lg text-gray-700">Carregando...</p>
             </div>
         </div>
     </div>
 
     <script type="module">
-        // Importa serviços Firebase do objeto global configurado
-        const {
-            initializeApp, getAuth, onAuthStateChanged, updateProfile,
-            createUserWithEmailAndPassword, signInWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut,
-            getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, Timestamp,
-            firebaseConfig
-        } = window.firebaseServices;
-
         const ENTRY_TYPES = ["Entrada", "Almoço Início", "Almoço Fim", "Saída"];
         const DAYS_OF_WEEK = [
             { key: 'monday', label: 'Segunda-feira' },
@@ -108,35 +61,71 @@
         ];
 
         // --- Variáveis de Estado Globais ---
-        let db = null;
-        let auth = null;
-        let userId = null;
-        let userName = null;
+        let userName = 'Usuário';
         let dailyEntries = {};
         let currentViewDate = new Date();
         let workloadSettings = {};
-        let dataListenerUnsubscribe = null; 
-        let settingsListenerUnsubscribe = null;
         let clockInterval = null;
-        const appId = 'time-clock-app-shared'; // Um ID fixo para a aplicação
 
         // Variáveis de estado para a UI
         let error = null;
-        let authError = null; // Para erros de login/registo
         let successMessage = null;
         let nextStatus = ENTRY_TYPES[0];
         let isExporting = false;
         let isSettingsOpen = false;
         let isSavingSettings = false;
-        let isAuthLoading = false; // Para estado de carregamento da autenticação
-        let authView = 'login'; // 'login' ou 'signup'
+
+        /**
+         * Funções de Persistência de Dados (localStorage)
+         */
+        const loadDataFromLocalStorage = () => {
+            try {
+                const storedEntries = localStorage.getItem('timeClockEntries');
+                const storedSettings = localStorage.getItem('timeClockSettings');
+                const storedName = localStorage.getItem('timeClockUserName');
+
+                if (storedEntries) {
+                    dailyEntries = JSON.parse(storedEntries);
+                } else {
+                    dailyEntries = {};
+                }
+
+                if (storedSettings) {
+                    workloadSettings = JSON.parse(storedSettings);
+                } else {
+                    // Configuração padrão
+                    workloadSettings = { monday: 8, tuesday: 8, wednesday: 8, thursday: 8, friday: 8, saturday: 0 };
+                }
+                
+                if (storedName) {
+                    userName = storedName;
+                }
+
+            } catch (e) {
+                console.error("Falha ao carregar dados do localStorage:", e);
+                error = "Não foi possível carregar seus dados salvos.";
+            }
+        };
+
+        const saveDataToLocalStorage = () => {
+            try {
+                localStorage.setItem('timeClockEntries', JSON.stringify(dailyEntries));
+                localStorage.setItem('timeClockSettings', JSON.stringify(workloadSettings));
+                localStorage.setItem('timeClockUserName', userName);
+            } catch (e) {
+                console.error("Falha ao salvar dados no localStorage:", e);
+                error = "Não foi possível salvar suas alterações.";
+            }
+        };
+
 
         /**
          * Funções utilitárias
          */
         const formatTime = (time) => {
             if (!time) return '--:--';
-            const date = time instanceof Timestamp ? time.toDate() : new Date(time);
+            // Os timestamps do JSON não são objetos Timestamp do Firebase, são strings ISO ou números
+            const date = new Date(time);
             return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
         };
 
@@ -174,11 +163,11 @@
          * Cálculos de totais
          */
         const calculateDailyTotals = (entries, dateKey) => {
-            const sortedEntries = [...(entries || [])].sort((a, b) => a.timestamp.toDate() - b.timestamp.toDate());
+            const sortedEntries = [...(entries || [])].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
             let totalWorkedMinutes = 0;
             let lunchMinutes = 0;
             const entryTimes = {};
-            sortedEntries.forEach(e => { entryTimes[e.type] = e.timestamp.toDate().getTime(); });
+            sortedEntries.forEach(e => { entryTimes[e.type] = new Date(e.timestamp).getTime(); });
             const { "Entrada": entradaTime, "Almoço Início": almocoInicioTime, "Almoço Fim": almocoFimTime, "Saída": saidaTime } = entryTimes;
             
             if (almocoInicioTime && almocoFimTime && almocoFimTime > almocoInicioTime) {
@@ -221,219 +210,72 @@
         };
         
         const getNextStatus = () => {
-            const todayData = dailyEntries[formatDateKey(new Date())];
-            const lastType = todayData ? todayData.lastEntryType : null;
+            const todayKey = formatDateKey(new Date());
+            const todayRawData = dailyEntries[todayKey];
+            if (!todayRawData) return ENTRY_TYPES[0];
+
+            const todayCalculated = calculateDailyTotals(todayRawData.entries, todayKey);
+            const lastType = todayCalculated.lastEntryType;
+
             if (!lastType) return ENTRY_TYPES[0]; 
             if(lastType === ENTRY_TYPES[3]) return null; // Saída
             const lastIndex = ENTRY_TYPES.indexOf(lastType);
             return (lastIndex !== -1 && lastIndex < ENTRY_TYPES.length - 1) ? ENTRY_TYPES[lastIndex + 1] : ENTRY_TYPES[0];
         }
 
-        const processDailyEntries = (docs) => {
-            const entriesMap = {};
-            docs.forEach(doc => {
-                const data = doc.data();
-                entriesMap[data.dateKey] = { ...data, ...calculateDailyTotals(data.entries || [], data.dateKey) };
-            });
-            dailyEntries = entriesMap;
-            nextStatus = getNextStatus();
-        }
-
-        /**
-         * Listeners do Firestore
-         */
-        function startDataListener(uid) {
-            if (dataListenerUnsubscribe) dataListenerUnsubscribe();
-            const collectionPath = `/artifacts/${appId}/users/${uid}/timeEntries`;
-            const q = query(collection(db, collectionPath)); 
-            dataListenerUnsubscribe = onSnapshot(q, (snapshot) => {
-                processDailyEntries(snapshot.docs);
-                renderApp();
-            }, (err) => {
-                console.error("Erro ao carregar registos:", err);
-                error = "Não foi possível carregar os registos de ponto.";
-                renderApp();
-            });
-        }
-        
-        function startSettingsListener(uid) {
-            if (settingsListenerUnsubscribe) settingsListenerUnsubscribe();
-            const settingsDocRef = doc(db, `/artifacts/${appId}/users/${uid}/settings/workload`);
-            settingsListenerUnsubscribe = onSnapshot(settingsDocRef, (docSnap) => {
-                if (docSnap.exists()) {
-                    workloadSettings = docSnap.data();
-                } else {
-                    workloadSettings = { monday: 8, tuesday: 8, wednesday: 8, thursday: 8, friday: 8, saturday: 0 };
-                }
-                processDailyEntries(Object.values(dailyEntries).map(d => ({ data: () => d })));
-                renderApp();
-            }, (err) => {
-                console.error("Erro ao carregar configurações:", err);
-                error = "Não foi possível carregar as configurações de carga horária.";
-                renderApp();
-            });
-        }
+        const processAllEntriesForDisplay = () => {
+            const processed = {};
+            for (const dateKey in dailyEntries) {
+                processed[dateKey] = {
+                    ...dailyEntries[dateKey],
+                    ...calculateDailyTotals(dailyEntries[dateKey].entries, dateKey)
+                };
+            }
+            return processed;
+        };
         
         /**
-         * Funções de Ação da UI e Autenticação
+         * Funções de Ação da UI
          */
-        window.toggleAuthView = (view) => {
-            authView = view;
-            authError = null;
-            renderApp();
-        };
-
-        window.handleLogin = async (event) => {
-            event.preventDefault();
-            const email = event.target.email.value;
-            const password = event.target.password.value;
-            isAuthLoading = true;
-            authError = null;
-            renderApp();
-
-            try {
-                await signInWithEmailAndPassword(auth, email, password);
-                // onAuthStateChanged irá lidar com a atualização da UI
-            } catch (e) {
-                if (e.code === 'auth/operation-not-allowed') {
-                    authError = "Método de login desativado. Ative o login por E-mail/Senha no painel do Firebase.";
-                } else {
-                    authError = "E-mail ou senha inválidos. Tente novamente.";
-                }
-                console.error("Erro de login:", e.code, e.message);
-            } finally {
-                isAuthLoading = false;
-                renderApp();
-            }
-        };
-
-        window.handleSignUp = async (event) => {
-            event.preventDefault();
-            const name = event.target.name.value;
-            const email = event.target.email.value;
-            const password = event.target.password.value;
-            isAuthLoading = true;
-            authError = null;
-            renderApp();
-
-            try {
-                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-                await updateProfile(userCredential.user, { displayName: name });
-                // onAuthStateChanged irá lidar com a atualização da UI
-            } catch (e) {
-                if (e.code === 'auth/operation-not-allowed') {
-                    authError = "Método de registo desativado. Ative o login por E-mail/Senha no painel do Firebase.";
-                } else {
-                    authError = "Não foi possível criar a conta. Verifique o e-mail ou tente novamente.";
-                }
-                console.error("Erro de registo:", e.code, e.message);
-            } finally {
-                isAuthLoading = false;
-                renderApp();
-            }
-        };
-
-        window.handleGoogleLogin = async () => {
-            isAuthLoading = true;
-            authError = null;
-            renderApp();
-            const provider = new GoogleAuthProvider();
-            try {
-                await signInWithPopup(auth, provider);
-                // onAuthStateChanged irá lidar com a atualização da UI
-            } catch (e) {
-                if (e.code === 'auth/unauthorized-domain') {
-                    authError = "Domínio não autorizado. Adicione este domínio à lista de domínios autorizados no painel do Firebase (Authentication -> Sign-in method) para usar o login do Google.";
-                } else if (e.code === 'auth/operation-not-allowed') {
-                    authError = "Método de login desativado. Ative o login com Google no painel do Firebase.";
-                } else {
-                    authError = "Não foi possível autenticar com o Google.";
-                }
-                console.error("Erro de login com Google:", e.code, e.message);
-            } finally {
-                isAuthLoading = false;
-                renderApp();
-            }
-        };
-
-        window.handleLogout = async () => {
-            try {
-                await signOut(auth);
-                // onAuthStateChanged irá resetar o estado e renderizar o ecrã de login
-            } catch (e) {
-                console.error("Erro ao sair:", e);
-                error = "Não foi possível sair. Tente novamente.";
-                renderApp();
-            }
-        };
-
-
-        window.saveUserName = async () => {
-            if (!auth.currentUser) {
-                error = "Utilizador não autenticado.";
-                successMessage = null;
-                renderApp();
-                return;
-            }
+        window.saveUserName = () => {
             const nameInput = document.getElementById('userNameInput');
             const newName = nameInput.value.trim();
 
             if (!newName) {
                 error = "O nome não pode estar em branco.";
                 successMessage = null;
-                renderApp();
-                return;
-            }
-
-            try {
-                await updateProfile(auth.currentUser, { displayName: newName });
+            } else {
                 userName = newName;
+                saveDataToLocalStorage();
                 successMessage = "Nome atualizado com sucesso!";
                 error = null;
-                renderApp();
                 setTimeout(() => { successMessage = null; renderApp(); }, 3000);
-            } catch (e) {
-                console.error("Erro ao atualizar o perfil:", e);
-                error = "Não foi possível atualizar o nome. Tente novamente.";
-                successMessage = null;
-                renderApp();
             }
+            renderApp();
         };
 
-        window.recordEntry = async () => {
-            if (!userId) {
-                error = "Utilizador não autenticado.";
-                renderApp();
-                return;
-            }
-            
+        window.recordEntry = () => {
             const todayKey = formatDateKey(new Date());
-            const todayDocRef = doc(db, `/artifacts/${appId}/users/${userId}/timeEntries/${todayKey}`);
-            const entryTimestamp = Timestamp.now();
+            const entryTimestamp = new Date().toISOString();
             const currentStatus = getNextStatus();
 
             if (!currentStatus) {
-                error = "Todos os pontos de hoje já foram registados.";
+                error = "Todos os pontos de hoje já foram registrados.";
                 renderApp();
                 return;
             }
 
-            try {
-                const docSnap = await getDoc(todayDocRef);
-                const existingEntries = docSnap.exists() ? docSnap.data().entries : [];
-                const updatedEntries = [...existingEntries, { type: currentStatus, timestamp: entryTimestamp }];
-
-                await setDoc(todayDocRef, { dateKey: todayKey, entries: updatedEntries }, { merge: true });
-
-                successMessage = `${currentStatus} registado com sucesso!`;
-                error = null;
-                setTimeout(() => { successMessage = null; renderApp(); }, 3000);
-            } catch (e) {
-                console.error("Erro ao registar ponto:", e);
-                error = "Não foi possível registar o ponto. Tente novamente.";
-            } finally {
-                renderApp();
+            if (!dailyEntries[todayKey]) {
+                dailyEntries[todayKey] = { dateKey: todayKey, entries: [] };
             }
+            
+            dailyEntries[todayKey].entries.push({ type: currentStatus, timestamp: entryTimestamp });
+            
+            saveDataToLocalStorage();
+            successMessage = `${currentStatus} registrado com sucesso!`;
+            error = null;
+            setTimeout(() => { successMessage = null; renderApp(); }, 3000);
+            renderApp();
         };
 
         window.exportToPDF = async () => {
@@ -474,8 +316,7 @@
         window.openSettings = () => { isSettingsOpen = true; renderApp(); };
         window.closeSettings = () => { isSettingsOpen = false; renderApp(); };
         
-        window.saveWorkloadSettings = async () => {
-            if (!db || !userId) return;
+        window.saveWorkloadSettings = () => {
             isSavingSettings = true;
             renderApp();
 
@@ -486,119 +327,88 @@
                 newSettings[day.key] = value < 0 ? 0 : value;
             });
 
-            try {
-                const settingsDocRef = doc(db, `/artifacts/${appId}/users/${userId}/settings/workload`);
-                await setDoc(settingsDocRef, newSettings);
-                successMessage = "Carga horária guardada com sucesso!";
-                setTimeout(() => { successMessage = null; renderApp(); }, 3000);
-            } catch (e) {
-                console.error("Erro ao guardar carga horária:", e);
-                error = "Não foi possível guardar as configurações.";
-            } finally {
-                isSavingSettings = false;
-                isSettingsOpen = false;
-                renderApp();
-            }
+            workloadSettings = newSettings;
+            saveDataToLocalStorage();
+
+            isSavingSettings = false;
+            isSettingsOpen = false;
+            successMessage = "Carga horária salva com sucesso!";
+            setTimeout(() => { successMessage = null; renderApp(); }, 3000);
+            renderApp();
         };
 
         /**
-         * Funções de Renderização
+         * Função de Renderização Principal
          */
-        function renderLoginScreen() {
+        function renderApp() {
             const root = document.getElementById('app-root');
             if (!root) return;
 
-            root.innerHTML = `
-                <div class="min-h-screen bg-gray-100 flex flex-col justify-center items-center p-4">
-                    <div class="w-full max-w-md bg-white rounded-xl shadow-2xl p-8">
-                        <h1 class="text-3xl font-extrabold text-blue-700 text-center mb-2">Controle de Ponto</h1>
-                        <p class="text-center text-gray-500 mb-6">Aceda à sua conta para continuar</p>
-
-                        <div class="flex border-b border-gray-200 mb-6">
-                            <button onclick="window.toggleAuthView('login')" class="flex-1 py-2 text-center font-semibold transition-colors ${authView === 'login' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}">Entrar</button>
-                            <button onclick="window.toggleAuthView('signup')" class="flex-1 py-2 text-center font-semibold transition-colors ${authView === 'signup' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'}">Registar</button>
-                        </div>
-
-                        ${authError ? `<div class="mb-4 p-3 text-sm text-red-700 bg-red-100 rounded-lg text-center">${authError}</div>` : ''}
-
-                        <form id="login-form" class="${authView === 'login' ? '' : 'hidden'}" onsubmit="window.handleLogin(event)">
-                            <div class="space-y-4">
-                                <div><label for="login-email" class="block text-sm font-medium text-gray-700">E-mail</label><input type="email" id="login-email" name="email" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></div>
-                                <div><label for="login-password" class="block text-sm font-medium text-gray-700">Senha</label><input type="password" id="login-password" name="password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></div>
-                            </div>
-                            <button type="submit" class="w-full mt-6 py-3 px-4 bg-blue-600 text-white font-bold rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 flex justify-center" ${isAuthLoading ? 'disabled' : ''}>${isAuthLoading ? '<div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>' : 'Entrar'}</button>
-                        </form>
-
-                        <form id="signup-form" class="${authView === 'signup' ? '' : 'hidden'}" onsubmit="window.handleSignUp(event)">
-                            <div class="space-y-4">
-                                <div><label for="signup-name" class="block text-sm font-medium text-gray-700">Nome Completo</label><input type="text" id="signup-name" name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></div>
-                                <div><label for="signup-email" class="block text-sm font-medium text-gray-700">E-mail</label><input type="email" id="signup-email" name="email" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></div>
-                                <div><label for="signup-password" class="block text-sm font-medium text-gray-700">Senha (mínimo 6 caracteres)</label><input type="password" id="signup-password" name="password" required minlength="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"></div>
-                            </div>
-                            <button type="submit" class="w-full mt-6 py-3 px-4 bg-blue-600 text-white font-bold rounded-lg shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 flex justify-center" ${isAuthLoading ? 'disabled' : ''}>${isAuthLoading ? '<div class="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>' : 'Criar Conta'}</button>
-                        </form>
-
-                        <div class="relative my-6"><div class="absolute inset-0 flex items-center"><div class="w-full border-t border-gray-300"></div></div><div class="relative flex justify-center text-sm"><span class="px-2 bg-white text-gray-500">Ou continue com</span></div></div>
-
-                        <div>
-                            <button onclick="window.handleGoogleLogin()" class="w-full flex items-center justify-center py-2.5 px-4 border border-gray-300 rounded-lg shadow-sm bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50" ${isAuthLoading ? 'disabled' : ''}>
-                                <svg class="w-5 h-5 mr-2" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path><path fill="none" d="M0 0h48v48H0z"></path></svg>Google
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            `;
-        }
-
-        function renderApp(isLoading = false) {
-            const root = document.getElementById('app-root');
-            if (!root) return;
-
-            if (!userId && !isLoading) {
-                renderLoginScreen();
-                return;
-            }
-
-            if (isLoading) {
-                 root.innerHTML = `<div class="flex items-center justify-center min-h-screen bg-gray-50"><div class="flex flex-col items-center p-8 bg-white rounded-xl shadow-lg"><div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div><p class="mt-4 text-lg text-gray-700">A carregar...</p></div></div>`;
-                 return;
-            }
-
+            nextStatus = getNextStatus();
+            const displayEntries = processAllEntriesForDisplay();
+            
             const currentMonth = currentViewDate.getMonth();
             const currentYear = currentViewDate.getFullYear();
-            const sortedDates = Object.keys(dailyEntries).filter(dateKey => new Date(dateKey + 'T00:00:00Z').getMonth() === currentMonth && new Date(dateKey + 'T00:00:00Z').getFullYear() === currentYear).sort((a, b) => b.localeCompare(a)); 
-            let totalWorkMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].totalWorkedMinutes || 0), 0);
-            let totalLunchMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].lunchMinutes || 0), 0);
-            let totalOvertimeMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].overtimeMinutes || 0), 0);
-            let totalDebitMinutes = sortedDates.reduce((acc, key) => acc + (dailyEntries[key].debitMinutes || 0), 0);
+            const sortedDates = Object.keys(displayEntries).filter(dateKey => new Date(dateKey + 'T00:00:00Z').getMonth() === currentMonth && new Date(dateKey + 'T00:00:00Z').getFullYear() === currentYear).sort((a, b) => b.localeCompare(a)); 
+            let totalWorkMinutes = sortedDates.reduce((acc, key) => acc + (displayEntries[key].totalWorkedMinutes || 0), 0);
+            let totalLunchMinutes = sortedDates.reduce((acc, key) => acc + (displayEntries[key].lunchMinutes || 0), 0);
+            let totalOvertimeMinutes = sortedDates.reduce((acc, key) => acc + (displayEntries[key].overtimeMinutes || 0), 0);
+            let totalDebitMinutes = sortedDates.reduce((acc, key) => acc + (displayEntries[key].debitMinutes || 0), 0);
             const monthYearLabel = currentViewDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
             
             root.innerHTML = `
-                <div id="settings-modal" class="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 ${isSettingsOpen ? 'opacity-100 visible' : 'opacity-0 invisible'}"><div class="modal-container bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4 ${isSettingsOpen ? 'transform scale-100' : 'transform scale-95'}"><div class="flex justify-between items-center mb-4"><h3 class="text-xl font-bold text-gray-800">Configurar Carga Horária Diária</h3><button onclick="closeSettings()" class="p-1 rounded-full hover:bg-gray-200"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button></div><div class="space-y-4">${DAYS_OF_WEEK.map(day => `<div class="flex items-center justify-between"><label for="workload-${day.key}" class="text-gray-700">${day.label}</label><input type="number" id="workload-${day.key}" min="0" max="24" step="0.5" class="w-24 text-center border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" value="${workloadSettings[day.key] !== undefined ? workloadSettings[day.key] : 8}"><span class="text-gray-500 ml-2">horas</span></div>`).join('')}</div><div class="mt-6 flex justify-end space-x-3"><button onclick="closeSettings()" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancelar</button><button onclick="saveWorkloadSettings()" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50" ${isSavingSettings ? 'disabled' : ''}>${isSavingSettings ? 'A guardar...' : 'Guardar'}</button></div></div></div>
+                <!-- Modal de Configurações -->
+                <div id="settings-modal" class="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 ${isSettingsOpen ? 'opacity-100 visible' : 'opacity-0 invisible'}"><div class="modal-container bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4 ${isSettingsOpen ? 'transform scale-100' : 'transform scale-95'}"><div class="flex justify-between items-center mb-4"><h3 class="text-xl font-bold text-gray-800">Configurar Carga Horária Diária</h3><button onclick="closeSettings()" class="p-1 rounded-full hover:bg-gray-200"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button></div><div class="space-y-4">${DAYS_OF_WEEK.map(day => `<div class="flex items-center justify-between"><label for="workload-${day.key}" class="text-gray-700">${day.label}</label><input type="number" id="workload-${day.key}" min="0" max="24" step="0.5" class="w-24 text-center border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500" value="${workloadSettings[day.key] !== undefined ? workloadSettings[day.key] : 8}"><span class="text-gray-500 ml-2">horas</span></div>`).join('')}</div><div class="mt-6 flex justify-end space-x-3"><button onclick="closeSettings()" class="px-4 py-2 bg-gray-200 text-gray-800 rounded-md hover:bg-gray-300">Cancelar</button><button onclick="saveWorkloadSettings()" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50" ${isSavingSettings ? 'disabled' : ''}>${isSavingSettings ? 'Salvando...' : 'Salvar'}</button></div></div></div>
 
-                <div class="min-h-screen bg-gray-100 p-4 md:p-8 font-sans">
-                    <header class="mb-8 text-center">
-                        <h1 class="text-4xl font-extrabold text-blue-700">Controle de Ponto Digital</h1>
-                         <div class="mt-4 p-4 bg-gray-200 rounded-lg max-w-md mx-auto shadow-inner relative">
-                             <button onclick="handleLogout()" class="absolute top-2 left-2 p-2 rounded-full hover:bg-gray-300 transition-colors" aria-label="Sair"><svg class="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg></button>
-                             <button onclick="openSettings()" class="absolute top-2 right-2 p-2 rounded-full hover:bg-gray-300 transition-colors" aria-label="Configurações"><svg class="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
-                            <p class="text-gray-800 text-lg"><span class="font-bold">${userName}</span></p>
-                            <p class="text-sm text-gray-600">ID: <span class="font-mono text-xs">${userId}</span></p>
-                            <div class="mt-3 flex items-center justify-center space-x-2"><input type="text" id="userNameInput" placeholder="Digite seu nome para atualizar" class="px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm flex-grow" value="${userName}"><button onclick="saveUserName()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg shadow-md transition-colors">Guardar</button></div>
+                <!-- Cabeçalho do Site -->
+                <nav class="bg-white shadow-md">
+                    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                        <div class="flex items-center justify-between h-16">
+                            <div class="flex items-center">
+                                <span class="font-bold text-xl text-blue-700">TimeClock Digital</span>
+                            </div>
+                            <div class="flex items-center">
+                               <span class="text-gray-800 font-medium">Olá, ${userName}</span>
+                            </div>
                         </div>
-                    </header>
-                    ${successMessage ? `<div class="mb-4 p-4 text-sm text-green-700 bg-green-100 rounded-lg max-w-lg mx-auto">${successMessage}</div>` : ''}
-                    ${error ? `<div class="mb-4 p-4 text-sm text-red-700 bg-red-100 rounded-lg max-w-lg mx-auto">${error}</div>` : ''}
-                    <div class="max-w-lg mx-auto text-center mb-6"><div id="live-clock" class="text-6xl font-bold text-gray-800 tracking-wider"></div><div class="text-lg text-gray-500 mt-1">${new Date().toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div></div>
-                    <div class="mb-6 max-w-lg mx-auto"><button onclick="recordEntry()" class="w-full py-4 px-6 text-xl font-bold text-white rounded-xl shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-opacity-50 ${nextStatus === 'Saída' || nextStatus === 'Almoço Fim' ? 'bg-red-500 hover:bg-red-600 focus:ring-red-300' : 'bg-green-500 hover:bg-green-600 focus:ring-green-300'} ${!nextStatus ? 'bg-gray-400 cursor-not-allowed' : ''}" ${!nextStatus ? 'disabled' : ''}>${nextStatus ? `Registar ${nextStatus}` : 'Todos os pontos de hoje foram registados'}</button></div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8 max-w-7xl mx-auto">
+                    </div>
+                </nav>
+
+                <!-- Conteúdo Principal -->
+                <main class="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 w-full">
+                    <div class="text-center">
+                        <h1 class="text-4xl font-extrabold text-gray-900">Controle de Ponto</h1>
+                        <p class="mt-2 text-lg text-gray-600">O seu gerenciador de horas pessoal e simplificado.</p>
+                    </div>
+
+                    <div class="mt-4 p-4 bg-white border border-gray-200 rounded-lg max-w-md mx-auto shadow-sm relative">
+                         <button onclick="openSettings()" class="absolute top-2 right-2 p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Configurações"><svg class="w-6 h-6 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg></button>
+                        <p class="text-gray-800 text-center text-lg"><span class="font-bold">Editar Nome de Utilizador</span></p>
+                        <div class="mt-3 flex items-center justify-center space-x-2"><input type="text" id="userNameInput" placeholder="Digite seu nome para atualizar" class="px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm flex-grow" value="${userName}"><button onclick="saveUserName()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg shadow-md transition-colors">Salvar</button></div>
+                    </div>
+
+                    ${successMessage ? `<div class="mt-6 mb-4 p-4 text-sm text-green-700 bg-green-100 rounded-lg max-w-lg mx-auto">${successMessage}</div>` : ''}
+                    ${error ? `<div class="mt-6 mb-4 p-4 text-sm text-red-700 bg-red-100 rounded-lg max-w-lg mx-auto">${error}</div>` : ''}
+                    
+                    <div class="mt-8 max-w-lg mx-auto text-center"><div id="live-clock" class="text-6xl font-bold text-gray-800 tracking-wider"></div><div class="text-lg text-gray-500 mt-1">${new Date().toLocaleDateString('pt-BR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div></div>
+                    <div class="mt-6 mb-8 max-w-lg mx-auto"><button onclick="recordEntry()" class="w-full py-4 px-6 text-xl font-bold text-white rounded-xl shadow-lg transition-transform transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-opacity-50 ${nextStatus === 'Saída' || nextStatus === 'Almoço Fim' ? 'bg-red-500 hover:bg-red-600 focus:ring-red-300' : 'bg-green-500 hover:bg-green-600 focus:ring-green-300'} ${!nextStatus ? 'bg-gray-400 cursor-not-allowed' : ''}" ${!nextStatus ? 'disabled' : ''}>${nextStatus ? `Registrar ${nextStatus}` : 'Todos os pontos de hoje foram registrados'}</button></div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                         <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Trabalhadas</p><p class="text-3xl font-bold text-gray-800">${formatDuration(totalWorkMinutes) || '0h 00m'}</p></div><div class="bg-blue-100 p-3 rounded-full"><svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div></div>
                         <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Almoço</p><p class="text-3xl font-bold text-gray-800">${formatDuration(totalLunchMinutes) || '0h 00m'}</p></div><div class="bg-yellow-100 p-3 rounded-full"><svg class="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 15.546c-.523 0-1.046.151-1.5.454a2.704 2.704 0 01-3 0 2.704 2.704 0 00-3 0 2.704 2.704 0 01-3 0 2.704 2.704 0 00-3 0c-.454-.303-.977-.454-1.5-.454V5.546c.523 0 1.046-.151 1.5-.454a2.704 2.704 0 013 0 2.704 2.704 0 003 0 2.704 2.704 0 013 0 2.704 2.704 0 003 0c.454.303.977.454 1.5.454v10z"></path></svg></div></div>
                         <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Débito</p><p class="text-3xl font-bold text-red-600">${formatDuration(totalDebitMinutes) || '0h 00m'}</p></div><div class="bg-red-100 p-3 rounded-full"><svg class="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div></div>
                         <div class="bg-white p-6 rounded-lg shadow-md flex items-center justify-between"><div><p class="text-sm font-medium text-gray-500">Total Horas Extras</p><p class="text-3xl font-bold text-green-600">${formatDuration(totalOvertimeMinutes) || '0h 00m'}</p></div><div class="bg-green-100 p-3 rounded-full"><svg class="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg></div></div>
                     </div>
-                    <main class="bg-white p-4 sm:p-6 md:p-8 rounded-2xl shadow-lg max-w-7xl mx-auto"><div class="flex flex-col sm:flex-row items-center justify-between mb-6"><div class="flex items-center space-x-4"><button onclick="handleMonthChange(-1)" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Mês anterior"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button><h2 class="text-2xl font-bold text-gray-800 text-center w-48">${monthYearLabel}</h2><button onclick="handleMonthChange(1)" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Próximo mês"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></button></div><button onclick="exportToPDF()" class="mt-4 sm:mt-0 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center space-x-2 disabled:opacity-50" ${isExporting ? 'disabled' : ''}><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg><span>${isExporting ? 'A exportar...' : 'Exportar PDF'}</span></button></div><div class="overflow-x-auto"><div id="report-content" class="bg-white"><div id="pdf-header" class="hidden"><div class="mb-6 pb-2 border-b border-gray-300"><h2 class="text-2xl font-bold text-gray-800">Relatório de Ponto</h2><p class="text-sm text-gray-500">Mês de ${monthYearLabel} | Gerado em: ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR')}</p><p class="text-sm text-gray-500">Utilizador: ${userName || 'Não definido'} (${userId})</p></div></div><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Entrada</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Início Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fim Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Saída</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Trabalhado</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Débito</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Extra</th></tr></thead><tbody class="bg-white divide-y divide-gray-200">${ sortedDates.length === 0 ? `<tr><td colspan="9" class="px-6 py-12 text-center text-gray-500">Nenhum registo encontrado para este mês.</td></tr>` : ( sortedDates.map((dateKey) => { const dayData = dailyEntries[dateKey]; const getEntryTime = (type) => { const entry = dayData.entries.find(e => e.type === type); return entry ? formatTime(entry.timestamp) : '--:--'; }; const dateObj = new Date(dateKey + 'T00:00:00Z'); const dateFormatted = dateObj.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: 'UTC' }); const isToday = dateKey === formatDateKey(new Date()); const debitMinutes = dayData.debitMinutes || 0; const overtimeMinutes = dayData.overtimeMinutes || 0; return `<tr class="${isToday ? 'bg-blue-50 font-semibold' : ''} hover:bg-gray-50"><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-900">${dateFormatted}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Entrada")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Almoço Início")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Almoço Fim")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Saída")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${formatDuration(dayData.lunchMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${formatDuration(dayData.totalWorkedMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm ${debitMinutes > 0 ? 'text-red-600 font-semibold' : 'text-gray-700'}">${formatDuration(debitMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm ${overtimeMinutes > 0 ? 'text-green-600 font-semibold' : 'text-gray-700'}">${formatDuration(overtimeMinutes)}</td></tr>`; }).join(''))}</tbody></table></div></div></main>
-                </div>
+
+                    <section class="bg-white p-4 sm:p-6 md:p-8 rounded-2xl shadow-lg"><div class="flex flex-col sm:flex-row items-center justify-between mb-6"><div class="flex items-center space-x-4"><button onclick="handleMonthChange(-1)" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Mês anterior"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg></button><h2 class="text-2xl font-bold text-gray-800 text-center w-48">${monthYearLabel}</h2><button onclick="handleMonthChange(1)" class="p-2 rounded-full hover:bg-gray-200 transition-colors" aria-label="Próximo mês"><svg class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></button></div><button onclick="exportToPDF()" class="mt-4 sm:mt-0 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center space-x-2 disabled:opacity-50" ${isExporting ? 'disabled' : ''}><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg><span>${isExporting ? 'Exportando...' : 'Exportar PDF'}</span></button></div><div class="overflow-x-auto"><div id="report-content" class="bg-white"><div id="pdf-header" class="hidden"><div class="mb-6 pb-2 border-b border-gray-300"><h2 class="text-2xl font-bold text-gray-800">Relatório de Ponto</h2><p class="text-sm text-gray-500">Mês de ${monthYearLabel} | Gerado em: ${new Date().toLocaleDateString('pt-BR')} ${new Date().toLocaleTimeString('pt-BR')}</p><p class="text-sm text-gray-500">Usuário: ${userName || 'Não definido'}</p></div></div><table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Entrada</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Início Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fim Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Saída</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Almoço</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Trabalhado</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Débito</th><th scope="col" class="px-3 py-3 md:px-6 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Extra</th></tr></thead><tbody class="bg-white divide-y divide-gray-200">${ sortedDates.length === 0 ? `<tr><td colspan="9" class="px-6 py-12 text-center text-gray-500">Nenhum registro encontrado para este mês.</td></tr>` : ( sortedDates.map((dateKey) => { const dayData = displayEntries[dateKey]; const getEntryTime = (type) => { const entry = dayData.entries.find(e => e.type === type); return entry ? formatTime(entry.timestamp) : '--:--'; }; const dateObj = new Date(dateKey + 'T00:00:00Z'); const dateFormatted = dateObj.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: 'UTC' }); const isToday = dateKey === formatDateKey(new Date()); const debitMinutes = dayData.debitMinutes || 0; const overtimeMinutes = dayData.overtimeMinutes || 0; return `<tr class="${isToday ? 'bg-blue-50 font-semibold' : ''} hover:bg-gray-50"><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-900">${dateFormatted}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Entrada")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Almoço Início")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Almoço Fim")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${getEntryTime("Saída")}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${formatDuration(dayData.lunchMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm text-gray-700">${formatDuration(dayData.totalWorkedMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm ${debitMinutes > 0 ? 'text-red-600 font-semibold' : 'text-gray-700'}">${formatDuration(debitMinutes)}</td><td class="px-3 py-3 md:px-6 whitespace-nowrap text-sm ${overtimeMinutes > 0 ? 'text-green-600 font-semibold' : 'text-gray-700'}">${formatDuration(overtimeMinutes)}</td></tr>`; }).join(''))}</tbody></table></div></div></section>
+                </main>
+
+                <!-- Rodapé do Site -->
+                <footer class="bg-white mt-auto">
+                    <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8 text-center text-gray-500">
+                        <p>&copy; ${new Date().getFullYear()} TimeClock Digital. Todos os direitos reservados.</p>
+                    </div>
+                </footer>
             `;
             
             startClock();
@@ -607,49 +417,12 @@
         /**
          * Inicialização do App
          */
-        async function initializeFirebase() {
-            if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === "SUA_API_KEY") {
-                error = "Erro: A configuração do Firebase não foi preenchida. Por favor, edite o ficheiro e adicione as suas chaves do Firebase.";
-                const root = document.getElementById('app-root');
-                root.innerHTML = `<div class="p-8 text-center text-red-600 bg-red-100">${error}</div>`;
-                return;
-            }
-            try {
-                const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
-                auth = getAuth(app);
-                renderApp(true); // Mostra o loader inicial
-                
-                onAuthStateChanged(auth, (user) => {
-                    if (user) {
-                        userId = user.uid;
-                        userName = user.displayName || user.email || 'Utilizador';
-                        startDataListener(userId); 
-                        startSettingsListener(userId);
-                    } else {
-                        userId = null;
-                        userName = null;
-                        if (dataListenerUnsubscribe) dataListenerUnsubscribe();
-                        if (settingsListenerUnsubscribe) settingsListenerUnsubscribe();
-                        dataListenerUnsubscribe = null;
-                        settingsListenerUnsubscribe = null;
-                        if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
-                        dailyEntries = {};
-                        workloadSettings = {};
-                        authView = 'login';
-                        isAuthLoading = false;
-                        authError = null;
-                        renderApp(); // Renderiza o ecrã de login
-                    }
-                });
-            } catch (e) {
-                console.error("Erro na inicialização:", e);
-                error = "Erro na inicialização da app. Tente novamente.";
-                renderApp();
-            }
+        function initializeApp() {
+            loadDataFromLocalStorage();
+            renderApp();
         }
 
-        window.onload = initializeFirebase;
+        window.onload = initializeApp;
     </script>
 </body>
 </html>
